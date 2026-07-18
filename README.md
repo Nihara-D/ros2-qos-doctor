@@ -1,32 +1,58 @@
 # ros2-qos-doctor
 
-A small CLI that catches QoS mismatches between ROS 2 publishers and subscribers before they waste your afternoon.
+CLI that detects silent QoS mismatches between ROS 2 publishers and subscribers.
 
-## Why I made this
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+![ROS 2](https://img.shields.io/badge/ROS%202-Jazzy-green)
+![Python](https://img.shields.io/badge/python-3.8%2B-blue)
 
-If you've spent time with ROS 2 you've probably hit this: a topic looks fine in `ros2 topic list`, your subscriber callback just never fires, and there's no error anywhere telling you why. Usually it's a QoS mismatch, the publisher and subscriber picked incompatible settings (reliability, durability, etc.) and DDS just quietly refuses to connect them. No warning, no crash, nothing in the logs.
+---
 
-I got bitten by this enough times that I wrote a tool to check for it automatically instead of guessing.
+## Table of Contents
 
-## What it does
+- [Why](#why)
+- [Demo](#demo)
+- [Install](#install)
+- [Usage](#usage)
+- [How It Works](#how-it-works)
+- [Using It During Development](#using-it-during-development)
+- [What It Checks](#what-it-checks)
+- [Limitations](#limitations)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
 
-Run `ros2-qos-doctor` while your nodes are up, and it scans every topic in the graph, compares the QoS settings of every publisher/subscriber pair on that topic, and tells you in plain language where they don't match and why the data isn't getting through.
+---
 
-Example output:
+## Why
+
+A topic can look perfectly healthy in `ros2 topic list`, while a subscriber callback never fires and nothing logs an error. Usually the cause is a QoS mismatch: the publisher and subscriber declared incompatible settings (reliability, durability, etc.), and DDS silently refuses to connect them.
+
+`ros2-qos-doctor` scans a live ROS 2 graph, compares every publisher/subscriber pair on every topic, and reports incompatibilities in plain language, before they cost you an afternoon of debugging.
+
+## Demo
+
+A publisher and subscriber were set up on purpose with mismatched QoS, to show the tool catching the exact problem it's designed for.
+
+**1. The publisher runs normally.** Partway through, DDS itself notices the subscriber wants incompatible settings:
+
+<img src="Terminal_1.png" alt="publisher terminal output" width="700">
+
+**2. The subscriber never receives a single message**, it looks connected, but nothing arrives, and there's no error:
+
+<img src="Terminal_2.png" alt="subscriber terminal output" width="700">
+
+**3. `ros2-qos-doctor` explains exactly why:**
+
+<img src="Terminal_3.png" alt="ros2-qos-doctor output" width="700">
 
 ```
-$ ros2-qos-doctor
-
 /scan
   [ERROR] reliability: publisher 'mismatched_publisher' = BEST_EFFORT, subscriber 'mismatched_subscriber' = RELIABLE
     Subscriber requires RELIABLE delivery but publisher only offers BEST_EFFORT. The subscriber will receive nothing.
 ```
 
-It exits with a non-zero status if it finds a real problem, so you can also drop it into a launch check or CI pipeline if you want.
-
-## Reproducing the example above
-
-There are two small demo scripts in `examples/` that create this exact mismatch on purpose, so you can see the tool actually catch it:
+Reproduce it yourself:
 
 ```bash
 # terminal 1
@@ -39,52 +65,95 @@ python3 examples/mismatched_sub.py
 ros2-qos-doctor
 ```
 
-Watch terminal 2, it never prints a "received" line. Now you know why.
-
 ## Install
 
+Requires a sourced ROS 2 install with `rclpy`. Developed and tested on Jazzy; should work on other recent distros (Humble, Kilted) since it only uses standard `rclpy` introspection APIs, but that hasn't been verified yet.
+
+**As a colcon package:**
+
 ```bash
-git clone https://github.com/niharandini/ros2-qos-doctor.git
+cd ~/ros2_ws/src
+git clone https://github.com/Nihara-D/ros2-qos-doctor.git
+cd ~/ros2_ws
+colcon build
+source install/setup.bash
+```
+
+**As a pip package:**
+
+```bash
+git clone https://github.com/Nihara-D/ros2-qos-doctor.git
 cd ros2-qos-doctor
 pip install -e .
 ```
-
-You need a sourced ROS 2 install (Humble, Jazzy, Kilted, anything with `rclpy`). No other dependencies.
 
 ## Usage
 
 ```bash
 ros2-qos-doctor                 # scan every topic once
-ros2-qos-doctor --topic /scan   # only check specific topic(s), can repeat this flag
-ros2-qos-doctor --watch         # keep re-scanning, useful while bringing a system up
+ros2-qos-doctor --topic /scan   # restrict to specific topic(s), repeatable
+ros2-qos-doctor --watch         # continuously re-scan
 ros2-qos-doctor --watch --interval 5
-ros2-qos-doctor --no-color      # plain text, e.g. for CI logs
+ros2-qos-doctor --no-color      # plain output, e.g. for CI logs
 ```
 
-## What it currently checks
+| Flag | Description |
+|---|---|
+| `--topic <name>` | Restrict the scan to one topic. Repeatable for multiple topics. |
+| `--watch` | Keep re-scanning instead of running once. |
+| `--interval <seconds>` | Seconds between scans in `--watch` mode. Default `3.0`. |
+| `--no-color` | Disable ANSI colors. |
 
-- **Reliability**: a subscriber asking for `RELIABLE` won't get anything from a `BEST_EFFORT` publisher, flagged as an error.
-- **Durability**: a subscriber asking for `TRANSIENT_LOCAL` won't get anything from a `VOLATILE` publisher, flagged as an error.
-- **Liveliness**: mismatched policies get flagged as a warning (rarely fatal, but worth knowing about).
+Exit code is `1` if a mismatch is found, `0` otherwise, safe to use in a pre-launch check or CI pipeline.
 
-Deadline and lifespan checks are natural next additions if anyone wants to send a PR.
+## How It Works
 
-## How it works, briefly
+`ros2-qos-doctor` spins up a short-lived ROS 2 node and calls `get_publishers_info_by_topic` / `get_subscriptions_info_by_topic`, both already exposed by `rclpy`, to read the live QoS profile of every endpoint on every topic. Each publisher/subscriber pair is then checked against the standard DDS QoS compatibility rules, and any mismatch is reported with a plain-English explanation of the resulting behavior.
 
-It spins up a short-lived ROS 2 node and uses `get_publishers_info_by_topic` / `get_subscriptions_info_by_topic`, both already exposed by `rclpy`, to pull the live QoS profile for every endpoint on every topic. Then it runs each publisher/subscriber pair through the standard DDS QoS compatibility rules. No extra middleware, no extra dependencies beyond `rclpy` itself.
+No extra middleware, no dependencies beyond `rclpy`, and no changes required to existing nodes.
+
+## Using It During Development
+
+| Situation | Command |
+|---|---|
+| Right after bringing your system up | `ros2-qos-doctor` |
+| While actively coding and restarting nodes | `ros2-qos-doctor --watch` |
+| Debugging a topic that "isn't working" | `ros2-qos-doctor --topic /suspicious_topic` |
+| Before committing or opening a PR | `ros2-qos-doctor` |
+| After integrating a third-party package | `ros2-qos-doctor` |
+
+Run it the same way you'd run `ros2 topic list` or `ros2 topic echo`, a quick, habitual sanity check rather than a one-time test. Leaving `--watch` running in a spare terminal while developing catches a mismatch the moment it appears, and checking a suspicious topic first can save time before reaching for print statements or `rqt_graph`. Since the exit code reflects pass/fail, it also fits naturally into a pre-commit hook or CI job. Mismatched defaults between your code and a third-party package (a sensor driver, a nav stack component) are one of the most common sources of this problem, so it's worth a check right after adding one.
+
+## What It Checks
+
+| Policy | Rule | Severity |
+|---|---|---|
+| Reliability | `RELIABLE` subscriber + `BEST_EFFORT` publisher | ERROR |
+| Durability | `TRANSIENT_LOCAL` subscriber + `VOLATILE` publisher | ERROR |
+| Liveliness | Publisher and subscriber policies differ | WARNING |
+
+## Limitations
+
+- Only the policies above are checked; deadline and lifespan are not yet covered.
+- Reads the QoS of nodes that are already running, it does not inspect nodes that haven't started, and does not statically parse launch files (see [Roadmap](#roadmap)).
+- Only reports on topics with both a publisher and a subscriber present; a topic with only one side has nothing to compare.
+- Diagnostic only, it identifies the mismatch but does not modify code or QoS settings for you.
+- Verified on Jazzy. Should work on other recent distros (Humble, Kilted) since it only relies on standard `rclpy` APIs, but that hasn't been tested yet.
+
+## Roadmap
+
+- Deadline and lifespan policy checks
+- A `--launch-file` mode for static analysis without a live system
+- A ready-made GitHub Action for CI
 
 ## Contributing
 
-Happy to take issues and PRs. A few things I'd like to add eventually:
-
-- Deadline / lifespan policy checks
-- A mode that reads a launch file statically instead of requiring a live system
-- A ready-made GitHub Action for CI use
+Issues and PRs are welcome, particularly around the roadmap items above.
 
 ## License
 
 Apache-2.0
 
-## Author
+---
 
 Nihara Randini - shniharard@gmail.com
